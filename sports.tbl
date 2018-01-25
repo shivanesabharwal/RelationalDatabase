@@ -1,0 +1,5 @@
+TeamName string,Sport string,Season int,Wins int,Losses int
+'Steelers','NFL Football',2015,10,6
+'Steelers','NFL Football',2014,11,5
+'Patriots','NFL Football',2015,12,4
+'Patriots','NFL Football',2014,12,4

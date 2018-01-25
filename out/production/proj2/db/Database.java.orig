@@ -1,0 +1,349 @@
+package db;
+
+
+import java.io.BufferedReader;
+import java.io.FileNotFoundException;
+import java.io.FileReader;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+
+public class Database {
+
+    public class Parse {
+        // Various common constructs, simplifies parsing.
+        private static final String REST = "\\s*(.*)\\s*",
+                COMMA = "\\s*,\\s*",
+                AND = "\\s+and\\s+";
+
+        // Stage 1 syntax, contains the command name.
+        private final Pattern CREATE_CMD = Pattern.compile("create table " + REST),
+                LOAD_CMD = Pattern.compile("load " + REST),
+                STORE_CMD = Pattern.compile("store " + REST),
+                DROP_CMD = Pattern.compile("drop table " + REST),
+                INSERT_CMD = Pattern.compile("insert into " + REST),
+                PRINT_CMD = Pattern.compile("print " + REST),
+                SELECT_CMD = Pattern.compile("select " + REST);
+
+        // Stage 2 syntax, contains the clauses of commands.
+        private final Pattern CREATE_NEW = Pattern.compile("(\\S+)\\s+\\((\\S+\\s+\\S+\\s*"
+                + "(?:,\\s*\\S+\\s+\\S+\\s*)*)\\)"),
+                SELECT_CLS = Pattern.compile("([^,]+?(?:,[^,]+?)*)\\s+from\\s+"
+                        + "(\\S+\\s*(?:,\\s*\\S+\\s*)*)(?:\\s+where\\s+"
+                        + "([\\w\\s+\\-*/'<>=!.]+?(?:\\s+and\\s+"
+                        + "[\\w\\s+\\-*/'<>=!.]+?)*))?"),
+                CREATE_SEL = Pattern.compile("(\\S+)\\s+as select\\s+"
+                        + SELECT_CLS.pattern()),
+                INSERT_CLS = Pattern.compile("(\\S+)\\s+values\\s+(.+?"
+                        + "\\s*(?:,\\s*.+?\\s*)*)");
+
+        public void main(String[] args) throws IOException {
+            if (args.length != 1) {
+                System.err.println("Expected a single query argument");
+                return;
+            }
+
+            eval(args[0]);
+        }
+
+        private String eval(String query) throws IOException {
+            Matcher m;
+            if ((m = CREATE_CMD.matcher(query)).matches()) {
+                return createTable(m.group(1));
+            } else if ((m = LOAD_CMD.matcher(query)).matches()) {
+                return loadTable(m.group(1));
+            } else if ((m = STORE_CMD.matcher(query)).matches()) {
+                storeTable(m.group(1));
+            } else if ((m = DROP_CMD.matcher(query)).matches()) {
+                return dropTable(m.group(1));
+            } else if ((m = INSERT_CMD.matcher(query)).matches()) {
+                return insertRow(m.group(1));
+            } else if ((m = PRINT_CMD.matcher(query)).matches()) {
+                return printTable(m.group(1));
+            } else if ((m = SELECT_CMD.matcher(query)).matches()) {
+                return select(m.group(1));
+            } else {
+                System.err.printf("Malformed query: %s\n", query);
+            }
+            return "";
+        }
+
+        private String createTable(String expr) {
+            Matcher m;
+            if ((m = CREATE_NEW.matcher(expr)).matches()) {
+                return createNewTable(m.group(1), m.group(2).split(COMMA));
+            } else if ((m = CREATE_SEL.matcher(expr)).matches()) {
+                createSelectedTable(m.group(1), m.group(2), m.group(3), m.group(4));
+            } else {
+                System.err.printf("Malformed create: %s\n", expr);
+            }
+            return "";
+        }
+
+        private String createNewTable(String name, String[] cols) {
+            ArrayList<String> types = new ArrayList<>();
+            ArrayList<String> names = new ArrayList<>();
+            for (String x : cols) {
+                for (int i = 0; i < x.length(); i++) {
+                    Character rand = x.charAt(i);
+                    if (rand == ' ') {
+                        names.add(x.substring(0, i));
+                        types.add(x.substring(i + 1, x.length()));
+                    }
+                }
+            }
+
+            Table toBeAdded = new Table(name, names, types);
+            insertTable(toBeAdded);
+            return "";
+        }
+
+        private void createSelectedTable(String name, String exprs, String tables, String conds) {
+            System.out.printf("You are trying to create a table named %s "
+                    + "by selecting these expressions:"
+                    + " '%s' from the join of these tables: '%s', "
+                    + "filtered by these conditions: '%s'\n", name, exprs, tables, conds);
+        }
+
+        private String loadTable(String name) throws IOException {
+            return tableReader(name);
+        }
+
+        private void storeTable(String name) {
+            System.out.printf("You are trying to store the table named %s\n", name);
+        }
+
+        private String dropTable(String name) {
+            Table toDrop = null;
+            for (Table t : databaseTables) {
+                if (t.getName().equals(name)) {
+                    toDrop = t;
+                }
+            }
+            if (toDrop == null) {
+                return "ERROR: You cannot drop a table that is not in the database";
+            }
+            return dropTheTable(toDrop);
+        }
+
+        private String insertRow(String expr) {
+            Matcher m = INSERT_CLS.matcher(expr);
+            if (!m.matches()) {
+                System.err.printf("Malformed insert: %s\n", expr);
+                return null;
+            }
+            String tableName = m.group(1);
+            Table t = null;
+            for (Table x : databaseTables) {
+                if (x.getName().equals(tableName)) {
+                    t = x;
+                }
+            }
+            String values = m.group(2);
+            ArrayList<String> rowValues = new ArrayList<>();
+            int last = 0;
+            for (int i = 0; i < values.length(); i++) {
+                if (values.charAt(i) == ',') {
+                    String val = values.substring(last, i);
+                    last = i + 1;
+                    rowValues.add(val);
+                }
+                if (i == values.length() - 1) {
+                    String lastVal = values.substring(last, i + 1);
+                    rowValues.add(lastVal);
+                }
+            }
+            return t.insertRow(rowValues);
+        }
+
+        private String printTable(String name) {
+            for (Table t : databaseTables) {
+                if (t.getName().equals(name)) {
+                    return t.toString();
+                }
+            }
+            return "ERROR: Table not in database";
+        }
+
+        private String select(String expr) {
+            Matcher m = SELECT_CLS.matcher(expr);
+            if (!m.matches()) {
+                System.err.printf("Malformed select: %s\n", expr);
+                return null;
+            }
+
+            return select(m.group(1), m.group(2), m.group(3));
+        }
+
+        private ArrayList<Table> getTableObjects(String tables) {
+            ArrayList<String> tableNames = new ArrayList<>();
+            int last = 0;
+            for (int i = 0; i < tables.length(); i++) {
+                if (tables.charAt(i) == ',') {
+                    tableNames.add(tables.substring(last, i));
+                    last = i + 1;
+                }
+                if (i == tables.length() - 1) {
+                    tableNames.add(tables.substring(last, i + 1));
+                }
+            }
+            ArrayList<Table> tableObjects = new ArrayList();
+            System.out.println(tableNames);
+            for (String x : tableNames) {
+                for (Table t : databaseTables) {
+                    if (t.getName().equals(x)) {
+                        tableObjects.add(t);
+                    }
+                }
+            }
+            return tableObjects;
+        }
+
+        private String select(String exprs, String tables, String conds) {
+            System.out.println(tables);
+            ArrayList<Table> tableObjects = getTableObjects(tables);
+<<<<<<< HEAD
+            return tableObjects.get(0).join(tableObjects.get(0), tableObjects.get(1
+//            for (Table t : tableObjects) {
+//                System.out.println(t);
+//            }
+//            return null;
+=======
+            return tableObjects.get(0).join(tableObjects.get(0), tableObjects.get(1));
+>>>>>>> c5683a10f19e48168df9a2eeaf257c2425c325d1
+        }
+    }
+
+
+    static ArrayList<Database> allDatabases;
+    private ArrayList<Table> databaseTables;
+
+    public Database() {
+        allDatabases = new ArrayList<>();
+        databaseTables = new ArrayList<>();
+        allDatabases.add(this);
+    }
+
+    public String transact(String query) {
+        try {
+            Parse reader = new Parse();
+            return reader.eval(query);
+        } catch (IOException i) {
+            return "IOEXCEPTION!!";
+        }
+
+
+    }
+
+    public String dropTheTable(Table x) {
+
+        databaseTables.remove(databaseTables.indexOf(x));
+        return "";
+    }
+
+    public void insertTable(Table x) {
+        databaseTables.add(x);
+    }
+
+    public String tableReader(String name) throws IOException {
+        try {
+            ArrayList<String> names = new ArrayList<>();
+            ArrayList<String> types = new ArrayList<>();
+            BufferedReader br = new BufferedReader(new FileReader(name + ".tbl"));
+            StringBuilder sb = new StringBuilder();
+            String line = br.readLine();
+            int last = 0;
+            for (int i = 0; i < line.length(); i++) {
+                Character rand = line.charAt(i);
+                if (rand == ' ') {
+                    names.add(line.substring(last, i));
+                    last = i + 1;
+                }
+                if (rand == ',') {
+                    types.add(line.substring(last, i));
+                    last = i + 1;
+                }
+                if (i == line.length() - 1) {
+                    types.add(line.substring(last, i + 1));
+                }
+            }
+            Table toBeAdded = new Table(name, names, types);
+            insertTable(toBeAdded);
+            line = br.readLine();
+            last = 0;
+            while (line != null) {
+                ArrayList<String> rowAdd = new ArrayList<>();
+                for (int i = 0; i < line.length(); i++) {
+                    Character rand = line.charAt(i);
+                    if (rand == ',') {
+                        rowAdd.add(line.substring(last, i));
+                        last = i + 1;
+                    }
+                    if (i == line.length() - 1) {
+                        rowAdd.add(line.substring(last, i + 1));
+                        last = 0;
+                    }
+                }
+                toBeAdded.insertRow(rowAdd);
+                line = br.readLine();
+            }
+            br.close();
+            return "";
+        } catch (FileNotFoundException f) {
+            return "ERROR: File not found.";
+        }
+
+    }
+<<<<<<< HEAD
+   /* public String select(String expr, String tables, String conds) throws IOException {
+        BufferedReader br = new BufferedReader(new FileReader(expr + ".tbl"));
+        String firstLine = br.readLine();
+        for (int i = 0; i < firstLine.length(); i++) {
+            if (firstLine.charAt(i) == ',') {
+            }
+        }
+        return null;
+    }
+    public String loadTable(String name) throws IOException {
+        String theTable = tableReader(name);
+        BufferedReader br = new BufferedReader(new FileReader(name + ".tbl"));
+        String firstLine = br.readLine();
+        ArrayList<String> colNames = new ArrayList<>();
+        ArrayList<String> typeNames = new ArrayList<>();
+        int last = 0;
+        for (int i = 0; i < firstLine.length(); i++) {
+            Character rand = theTable.charAt(i);
+            if (rand == ' ') {
+                colNames.add(theTable.substring(last, i));
+            }
+            if (rand == ',') {
+                typeNames.add(theTable.substring(last, i));
+            }
+            last = i + 1;
+        }
+        Table temp = new Table("new", colNames, typeNames);
+        for (int i = last; i < theTable.length(); i++) {
+            if (theTable.charAt(i) == '\\') {
+                i++;
+            }
+            if (theTable.charAt(i) == ',') {
+                ArrayList<String> row = new ArrayList<>();
+                row.add(theTable.substring(i - 1, i));
+                row.add(theTable.substring(i + 1, i + 2));
+                temp.insertRow(row);
+            }
+        }
+        return temp.printTable();
+    }*/
+
+    public static void main(String[] args) throws IOException{
+
+    }
+
+
+
+=======
+>>>>>>> c5683a10f19e48168df9a2eeaf257c2425c325d1
+}
